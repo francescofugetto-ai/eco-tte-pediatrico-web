@@ -731,12 +731,78 @@ var TI_SUP = reg([
   {k:'ivsMot', l:'Movimento del setto', type:'select', opt:['','normale','appiattito in sistole','appiattito in diastole','paradosso']},
   {k:'ecc',    l:'Indice di eccentricità del VS', u:'', s:'normale 1,0', r:{uln:1.1, hi:[1.4,1.8]}, dec:2}
 ]);
+/* Coupling ventricolo-arterioso. Il CALCOLO è il gemello di quello della
+   scheda d'azione dello shock e della scheda adulto; il GIUDIZIO no, ed è una
+   differenza voluta. Ea ed Ees assolute cadono ripidamente al crescere della
+   superficie corporea — in un lattante valgono più volte che in un
+   adolescente — e non esistono valori di riferimento pediatrici consolidati:
+   si mostrano come numeri, senza soglia e senza colore. Il giudizio sta sul
+   solo rapporto, che negli studi disponibili non varia con l'età. */
+var TI_VAC = reg([
+  {k:'cPas', l:'Pressione arteriosa sistolica', u:'mmHg', s:'al bracciale, al momento dell’esame', dec:0},
+  {k:'cPad', l:'Pressione arteriosa diastolica', u:'mmHg', dec:0},
+  {k:'pep',  l:'PEP', u:'ms', s:'inizio del QRS → inizio del flusso aortico', dec:0},
+  {k:'tsp',  l:'TSP', u:'ms', s:'inizio del QRS → fine del flusso aortico', dec:0},
+  {k:'ea',   l:'Ea — elastanza arteriosa', u:'mmHg/ml', calc:1, s:'numero, non giudizio: nel bambino non ha soglie', dec:2},
+  {k:'ees',  l:'Ees — elastanza telesistolica', u:'mmHg/ml', calc:1, s:'come sopra: si legge nel tempo, non contro un limite', dec:2},
+  {k:'eaees',l:'Ea/Ees', u:'', calc:1, s:'qui sì: il rapporto non cambia con l’età', r:{lln:0.5, uln:1.0, hi:[1.36], labs:['zona grigia','disaccoppiato'], loLab:'iper-accoppiato', txt:'0,5–1,0'}, dec:2}
+]);
 
 /* ═══════════════════════════════════════════════════════════════════════════
    CALCOLO
    ═══════════════════════════════════════════════════════════════════════════ */
 function sq(x){ return x*x; }
 function areaFromD(dmm){ if(dmm===null) return null; var d=dmm/10; return Math.PI*d*d/4; }
+
+/* ── coupling ventricolo-arterioso, metodo single-beat di Chen (JACC 2001) ──
+   La formula è quella della scheda d'azione dello shock, lettera per lettera.
+   Quello che NON si copia è il giudizio sulle singole elastanze: il metodo è
+   validato nell'adulto e nel bambino sovrastima Ees, perché si appoggia a
+   intervalli di tempo che a frequenze alte diventano brevissimi (Chowdhury,
+   JASE 2016). Da qui niente soglie su Ea ed Ees, niente tabella di manovra,
+   e l'avviso in chiaro accanto al risultato.                               */
+var CHEN = [0.35695, -7.2266, 74.249, -307.39, 684.54, -856.92, 571.95, -159.1];
+function chenEnd(t){ var s=0; for(var i=0;i<CHEN.length;i++) s+=CHEN[i]*Math.pow(t,i); return s; }
+function vacCalc(){
+  var R = { ea:null, ees:null, r:null, tnd:null, pes:null, cls:'box-accent', nota:'',
+            manca:[], avvisi:[], usati:[], invalida:false };
+  var pas=n('cPas'), pad=n('cPad'), pep=n('pep'), tsp=n('tsp'),
+      fe=efValue(), fc=num(S.fc),
+      sv=(D.sv!==undefined&&D.sv!==null&&isFinite(D.sv))?D.sv:null;
+
+  if(pas===null) R.manca.push('pressione sistolica');
+  if(sv===null) R.manca.push('diametro e VTI dell’efflusso sinistro');
+  if(R.manca.length) return R;
+
+  R.pes = 0.9*pas;
+  R.ea  = R.pes/sv;
+  R.usati.push('PA '+nff(pas,0)+(pad!==null?'/'+nff(pad,0):'')+' mmHg');
+  R.usati.push('gittata '+nff(sv,1)+' ml');
+  if(fe!==null&&fe!==undefined) R.usati.push('FE '+nff(fe,0)+'%');
+  if(fc!==null) R.usati.push('FC '+nff(fc,0)+' bpm');
+
+  if(pad===null) R.manca.push('pressione diastolica');
+  if(fe===null||fe===undefined) R.manca.push('FE (scheda Ventricolo sn)');
+  if(pep===null) R.manca.push('PEP');
+  if(tsp===null) R.manca.push('TSP');
+  if(R.manca.length) return R;
+
+  if(tsp>0 && fe>0 && fe<=100){
+    R.tnd = pep/tsp;
+    var endEst = 0.0275 - 0.165*(fe/100) + 0.3656*(pad/R.pes) + 0.515*chenEnd(R.tnd);
+    if(endEst>0) R.ees = (pad - endEst*R.pes)/(endEst*sv);
+    if(R.tnd<0.05||R.tnd>0.6) R.avvisi.push('tNd = '+nff(R.tnd,3)+', fuori dall’intervallo abituale 0,05–0,60: ricontrolla PEP e TSP.');
+  }
+  if(R.ees===null || !(R.ees>0)){ R.ees=null; R.invalida=true; return R; }
+
+  R.r = R.ea/R.ees;
+  if(R.r<0.5){ R.cls='box-warn'; R.nota='iper-accoppiato: carico molto basso, spesso vasoplegia'; }
+  else if(R.r<=1.0){ R.cls='box-ok'; R.nota='accoppiato — non è qui il problema principale'; }
+  else if(R.r<=1.36){ R.cls='box-warn'; R.nota='zona grigia: sorveglia dopo ogni modifica'; }
+  else { R.cls='box-red'; R.nota='disaccoppiato (soglia 1,36)'; }
+  if(R.tnd!==null) R.usati.push('tNd '+nff(R.tnd,3));
+  return R;
+}
 
 function recalc(){
   var w = num(S.peso), h = num(S.alt), fc = num(S.fc);
@@ -806,6 +872,10 @@ function recalc(){
   /* cava */
   if(n('ivcMax')!==null && n('ivcMin')!==null && n('ivcMax')>0) D.ivcColl = (n('ivcMax')-n('ivcMin'))/n('ivcMax')*100;
 
+  /* coupling ventricolo-arterioso — dopo la gittata, che gli serve */
+  D.vac = vacCalc();
+  D.ea = D.vac.ea; D.ees = D.vac.ees; D.eaees = D.vac.r;
+
   /* z-score di tutti i parametri */
   Z = {};
   for(var k in P){
@@ -839,7 +909,7 @@ function gradeAbs(v, sp){
   if(v===null||!sp) return null;
   var OK = { t:0, lab:'nella norma' };
   if(sp.hi && sp.hi.length){
-    if(sp.lln!==undefined && sp.lln!==null && v < sp.lln) return { t:0.22, lab:'sotto range' };
+    if(sp.lln!==undefined && sp.lln!==null && v < sp.lln) return { t:0.22, lab:sp.loLab||'sotto range' };
     if(sp.uln===null||sp.uln===undefined||v<=sp.uln) return OK;
     return bands(v, sp.uln, sp.hi, true, sp.labs);
   }
@@ -1065,7 +1135,27 @@ function buildUI(){
      + groupHTML('Riempimento', TI_FILL)
      + groupHTML('Pericardio', TI_PERI)
      + groupHTML('Supporto e interazione ventricolare', TI_SUP)
-     + '<div id="v_ti"></div></div>';
+     + '<div id="v_ti"></div>'
+     + '<div class="subsection-label">Coupling ventricolo-arterioso</div>'
+     + box('box-accent','A che serve adesso','<strong>Ea</strong> è il carico che il ventricolo ha davanti, '
+       + '<strong>Ees</strong> è quanto riesce a spingere. Se il rapporto è alto perché <em>Ea è alta</em> → scarica. '
+       + 'Se è alto perché <em>Ees è bassa</em> → sostieni la pompa. Non è la stessa terapia.')
+     + '<div class="hint">Metodo single-beat di Chen. La gittata viene da diametro e VTI dell’efflusso sinistro, la FE dalla scheda Ventricolo sn, la frequenza dalla testata: qui si aggiungono la pressione al bracciale, PEP e TSP.</div>'
+     + groupHTML('Elastanze', TI_VAC,
+         '<strong>PEP</strong> = dall’inizio del QRS all’inizio del flusso aortico · <strong>TSP</strong> = dall’inizio del QRS alla fine del flusso aortico, sullo stesso tracciato Doppler con ECG a 100 mm/s. '
+       + 'L’<strong>efflusso sinistro</strong> si misura in parasternale asse lungo, zoom, mesosistole: entra al quadrato, e nel bambino piccolo un errore di mezzo millimetro pesa molto sulla gittata. '
+       + 'Il <strong>VTI</strong> in apicale 5 camere, stesso punto del diametro, angolo &lt;20°.')
+     + '<div id="v_vac"></div>'
+     + box('box-warn','Quanto ci si può fidare',
+         'Il metodo è <strong>validato nell’adulto</strong>. Nel bambino tende a <strong>sovrastimare Ees</strong>, perché si appoggia a intervalli di tempo che a frequenze alte diventano brevissimi, e l’errore di misura pesa di più. '
+       + 'Per questo <strong>Ea ed Ees sono mostrate come numeri e basta</strong>: cadono entrambe al crescere della superficie corporea, e non esistono valori di riferimento pediatrici consolidati contro cui giudicarle. '
+       + 'Il giudizio sta sul <strong>solo rapporto</strong>, e anche le sue soglie vengono dall’adulto. '
+       + 'Leggilo <strong>nel tempo, nello stesso bambino</strong>, e insieme a indice cardiaco, lattato e ScvO₂: Ea/Ees misura <strong>efficienza, non adeguatezza</strong>.')
+     + box('box-accent','Il test che conta','Ogni volta che modifichi il vasoattivo, <strong>rimisura il VTI</strong>. Se alzi il vasopressore e il VTI scende, hai comprato un numero sul monitor pagandolo con il flusso: torna indietro.')
+     + box('box-ok','Bersaglio','<strong>Ea/Ees verso 0,5–1,0</strong>: migliora prima della clinica. Confronta sempre misure fatte con lo stesso metodo — i diversi metodi single-beat non sono intercambiabili.')
+     + box('box-red','Non fare','<strong>Fenilefrina</strong> per sostenere la pressione in un cuore che fatica: alza Ea, abbassa Ees e peggiora il coupling. '
+       + '<strong>L’eccezione è l’opposto e va conosciuta:</strong> nella crisi ipossica della tetralogia di Fallot, e nelle lesioni con shunt destro-sinistro dinamico, alzare le resistenze sistemiche è il trattamento — lì la fenilefrina si usa, e il coupling non è la lente giusta.')
+     + '</div>';
 
   H += '<div class="tab" id="t_rep">'
      + '<div class="subsection-label">Referto</div>'
@@ -1296,6 +1386,28 @@ function vTI(){
   return verdictBox(cls, 'Terapia intensiva', main, why.length?why:null);
 }
 
+function vVAC(){
+  var R = D.vac;
+  if(!R) return '';
+  var nota = '<span class="sub" style="display:block;font-size:12px;font-weight:400;color:var(--text-secondary);margin-top:3px">';
+  if(R.ea===null){
+    return box('box-accent','Coupling ventricolo-arterioso',
+      'Servono: '+R.manca.join(', ')+'.');
+  }
+  var usati = R.usati.length ? nota+'In uso: '+R.usati.join(' · ')+'</span>' : '';
+  if(R.r===null){
+    return box('box-accent','Coupling ventricolo-arterioso',
+      '<span class="verdict">Ea '+nff(R.ea,2)+' mmHg/ml'+usati+'</span>'+
+      nota+(R.invalida
+        ? 'Ees non calcolabile con questi valori: ricontrolla PEP, TSP, FE e pressione diastolica.'
+        : 'Per Ees servono ancora: '+R.manca.join(', ')+'.')+'</span>');
+  }
+  var body = '<span class="verdict">Ea/Ees '+nff(R.r,2)+' — '+R.nota+
+    nota+'Ea '+nff(R.ea,2)+' · Ees '+nff(R.ees,2)+' mmHg/ml — numeri senza soglia pediatrica: si leggono nel tempo</span>'+usati+'</span>';
+  if(R.avvisi.length) body += nota+R.avvisi.join(' ')+'</span>';
+  return box(R.cls,'Coupling ventricolo-arterioso', body);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    REFERTO
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -1519,6 +1631,12 @@ function buildReport(){
   if(D.co!==undefined&&D.co!==null) tB.push('portata '+nff(D.co,2)+' l/min');
   if(D.ci!==undefined&&D.ci!==null) tB.push('indice cardiaco '+nff(D.ci,2)+' l/min/m²');
   if(tB.length) s.push('Emodinamica '+((D.ci!==undefined&&D.ci!==null&&D.ci<2.5)?'con portata ridotta':'con portata conservata')+' ('+tB.join(', ')+').');
+  var vc=D.vac;
+  if(vc && vc.r!==null){
+    s.push('Coupling ventricolo-arterioso (single-beat, Chen): Ea '+nff(vc.ea,2)+' mmHg/ml, Ees '+nff(vc.ees,2)+
+      ' mmHg/ml, rapporto Ea/Ees '+nff(vc.r,2)+' ('+vc.nota.replace(/ \((.*)\)$/,', $1')+'). '+
+      'Metodo validato nell’adulto, da leggere nel tempo.');
+  }
   var iB=[];
   if(n('ivcMax')!==null) iB.push('vena cava inferiore '+V('ivcMax',1)+' mm');
   if(D.ivcColl!==undefined&&D.ivcColl!==null) iB.push('collassabilità '+nff(D.ivcColl,0)+'%');
@@ -1588,7 +1706,7 @@ function refresh(){
     var gp = geoPattern();
     gb.innerHTML = geoSVG() + (gp ? '<div class="hint">Geometria del ventricolo sinistro: <strong>'+gp.p+'</strong>.</div>' : '<div class="hint">Compilare setto, parete posteriore, LVIDd e altezza per collocare il punto nel piano.</div>');
   }
-  var M = {v_lv:vLV, v_rv:vRV, v_at:vAT, v_val:vVAL, v_ao:vAO, v_pa:vPA, v_cor:vCOR, v_dia:vDIA, v_seq:vSEQ, v_chd:vCHD, v_po:vPO, v_ti:vTI};
+  var M = {v_lv:vLV, v_rv:vRV, v_at:vAT, v_val:vVAL, v_ao:vAO, v_pa:vPA, v_cor:vCOR, v_dia:vDIA, v_seq:vSEQ, v_chd:vCHD, v_po:vPO, v_ti:vTI, v_vac:vVAC};
   for(var id in M){ if(!M.hasOwnProperty(id)) continue; var el=$(id); if(el) el.innerHTML = M[id](); }
 
   var rt = $('repText');
